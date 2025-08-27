@@ -1,0 +1,207 @@
+---
+title: "WHO Life Expectancy — Modeling & Variable Selection"
+author: "Dominion Samuel"
+date: "August 26, 2025"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+set.seed(42)
+
+```
+
+# Introduction
+
+This project stems from my deep interest in improving health outcomes in developing countries. I was motivated to explore the key drivers of low life expectancy to better understand which areas could benefit most from targeted interventions. Using global health data, this analysis investigates factors associated with low life expectancy (defined as under 65 years) and employs logistic regression (binary outcome), stepwise selection (AIC and BIC), and LASSO regularization to identify the most influential predictors and assess model performance.
+
+I aim to:
+
+1.  Transform life expectancy into a binary outcome.
+
+2.  Build predictive models using stepwise selection and LASSO.
+
+3.  Compare selected variables and evaluate the final model using accuracy, confusion matrices, and ROC/AUC.
+
+4.  Interpret my findings and their implications in potential decisions.
+
+# Data Preparation
+
+```{r}
+library(tidyverse)
+library(broom)
+library(MASS)     # stepAIC
+library(glmnet)   # LASSO
+library(caret)    # train/test split + confusion matrices
+library(pROC)     # AUC/ROC
+```
+
+```{r }
+# Load cleaned life expectancy dataset
+life <- read_csv("../data/life_clean.csv")
+
+# Create binary outcome: 1 if life expectancy < 65, else 0
+life <- life %>%
+  mutate(
+    low_lifeexp = ifelse(life_expectancy < 65, 1, 0),
+    low_lifeexp = factor(low_lifeexp, levels = c(0,1))
+  ) %>%
+  dplyr::select(-life_expectancy)
+
+# Overview of dataset
+glimpse(life)
+
+# Check balance of outcome variable
+table(life$low_lifeexp)
+```
+
+The outcome is imbalanced (968 vs 439), but not extreme
+
+```{r }
+# Split data into 70% train, 30% test for later testing
+set.seed(42)
+train_idx <- sample(nrow(life), 0.7*nrow(life))
+train <- life[train_idx, ]
+test  <- life[-train_idx, ]
+
+
+```
+
+## Logistic Regression
+
+```{r}
+# Base model with all predictors
+base_formula <- as.formula("low_lifeexp ~ .")
+
+m_base <- glm(base_formula, data = train, family = binomial())
+
+```
+
+We get warnings about fitted probabilities numerically 0 or 1, likely due to separation or extreme predictors. This is common with rare or perfectly separable events and should not affect analysis strongly.
+
+## Stepwise Selection
+
+```{r}
+m_step_aic <- stepAIC(m_base, direction = "both", trace = FALSE)
+
+n_train <- nrow(train)
+m_step_bic <- stepAIC(m_base, direction = "both", k = log(n_train), trace = FALSE)
+
+list(
+  AIC_selected = formula(m_step_aic),
+  BIC_selected = formula(m_step_bic)
+)
+```
+
+AIC selected: adult_mortality + diphtheria + hiv_aids + gdp + schooling
+
+BIC selected: adult_mortality + hiv_aids + gdp + schooling
+
+BIC is stricter, penalizing model complexity more heavily.
+
+# LASSO Selection
+
+```{r}
+# Model matrices for glmnet
+x_tr <- model.matrix(base_formula, data = train)[,-1]
+y_tr <- as.numeric(train$low_lifeexp) - 0
+
+x_te <- model.matrix(base_formula, data = test)[,-1]
+y_te <- as.numeric(test$low_lifeexp) - 0
+
+
+# 10-fold CV for LASSO
+cvfit <- cv.glmnet(
+  x = x_tr, y = y_tr,
+  alpha = 1,           # LASSO
+  family = "binomial",
+  nfolds = 10
+)
+
+# Extract selected coefficients
+coef_lasso <- coef(cvfit, s = "lambda.1se")
+lasso_tbl <- tibble(
+  feature = rownames(coef_lasso),
+  coef = as.numeric(coef_lasso)
+) %>%
+  filter(feature != "(Intercept)", abs(coef) > 1e-8) %>%
+  arrange(desc(abs(coef)))
+
+lasso_tbl
+
+```
+
+LASSO shrinks many coefficients to zero, highlighting the most important predictors for low life expectancy.
+
+```{r}
+# Fit final logistic regression using LASSO-selected variables
+selected_vars <- lasso_tbl$feature
+formula_sel <- as.formula(paste("low_lifeexp ~", paste(selected_vars, collapse = " + ")))
+
+model_final <- glm(formula_sel, data = train, family = binomial())
+summary(model_final)
+
+```
+
+Significant predictors: schooling, hiv_aids, adult_mortality
+
+Other variables (total_expenditure, bmi, diphtheria, polio) are not significant individually.
+
+Direction: Higher schooling decreases odds of low life expectancy; higher HIV/AIDS prevalence and adult mortality increase odds.
+
+# Model Evaluation
+
+```{r}
+# Predictions on test set
+pred_prob <- predict(model_final, test, type = "response")
+pred_class <- factor(ifelse(pred_prob >= 0.5, 1, 0), levels = c(0,1))
+
+# Confusion matrix
+conf_mat<- confusionMatrix(pred_class, test$low_lifeexp)
+conf_mat
+
+cm_table <- as.table(conf_mat$table)
+cm_df <- as.data.frame(cm_table)
+
+ggplot(cm_df, aes(Prediction, Reference, fill = Freq)) +
+  geom_tile(color = "black") +
+  geom_text(aes(label = Freq), size = 6) +
+  scale_fill_gradient(low = "white", high = "red") +
+  theme_minimal()
+
+
+```
+
+Accuracy: 0.922
+
+Balanced Accuracy: 0.895
+
+Sensitivity (detecting high life expectancy correctly): 0.966
+
+Specificity (detecting low life expectancy correctly): 0.824
+
+Interpretation: Model performs very well, slightly better at identifying countries with higher life expectancy.
+
+
+```{r}
+# AUC
+roc_obj <- roc(as.numeric(test$low_lifeexp)-1, pred_prob)
+plot(roc_obj, col = "blue", main = "ROC Curve for Logistic Regression")
+auc(roc_obj)
+```
+
+# Key Findings
+
+1.  Most important predictors: schooling, hiv_aids, adult_mortality, gdp.
+
+2.  Higher schooling reduces risk; higher HIV/AIDS prevalence and adult mortality increase risk.
+
+3.  LASSO and stepwise selection (AIC/BIC) largely agree on important variables.
+
+4.  The final model shows excellent predictive performance (Accuracy 0.92, AUC 0.97).
+
+5.  Some warnings about fitted probabilities = 0/1 indicate potential separation, but overall performance remains robust.
+
+# Conclusion
+
+This analysis highlights key predictors of low life expectancy and demonstrates effective modeling using stepwise selection and LASSO. The model is highly accurate and can inform health policy priorities, such as improving education and addressing HIV/AIDS prevalence. Thank you!

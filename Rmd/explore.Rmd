@@ -1,0 +1,81 @@
+---
+title: "WHO Life Expectancy — Cleaning & EDA"
+author: "Dominion Samuel"
+date: "August 26,2025"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(janitor)
+library(skimr)
+library(GGally)
+
+```
+
+# Introduction
+
+This notebook focuses on cleaning and exploring the Life Expectancy dataset. The dataset contains global health indicators over multiple years for developing and developed countries.
+
+My aim is to prepare a clean dataset for later statistical modeling, focusing on developing countries from the year 2000 onward. I also examine variable distributions and correlations to identify potential predictors of low life expectancy.
+
+## Download and load data
+
+```{r}
+# Define URLs and paths
+raw_url <- "https://raw.githubusercontent.com/selva86/datasets/master/Life_Expectancy_Data.csv"
+dest    <- "../data/Life_Expectancy_Data.csv"
+
+# Download dataset if not already present
+if (!file.exists(dest)) {
+  download.file(raw_url, destfile = dest, mode = "wb")
+}
+# Load dataset and clean column names
+raw <- read_csv(dest) |> clean_names()
+
+
+glimpse(raw)
+
+skim(raw)
+```
+
+## Data Cleaning
+
+```{r}
+# Select only Developing Countries from this century(up to 2015)
+df_clean <- raw %>%
+  filter(status == 'Developing', year >=2000, year <=2015) 
+```
+
+Filtering ensures the analysis focuses on relevant countries and recent years.
+
+## Select Relevant Variables
+
+```{r}
+# Select variables to focus on
+df_clean <- df_clean %>%
+  select(life_expectancy, adult_mortality, infant_deaths, alcohol,hepatitis_b,
+         measles,bmi,polio, total_expenditure,diphtheria, hiv_aids, gdp,
+         population,thinness_1_19_years, schooling )
+glimpse(df_clean)
+```
+
+We focus on variables likely to influence life expectancy, including health indicators, disease prevalence, economic factors, and nutrition metrics.
+
+## Quick EDA
+
+```{r}
+ggplot(df_clean, aes(life_expectancy)) + geom_histogram(bins = 30)
+```
+
+```{r}
+num_only <- df_clean |> select(where(is.numeric)) 
+ggpairs(num_only[, 1:min(6, ncol(num_only))], progress = FALSE)
+
+```
+
+## Save Cleaned Data
+
+```{r}
+write_csv(df_clean, "../data/life_clean.csv")
+```
